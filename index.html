@@ -1,0 +1,378 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Bookmaker Location Analysis</title>
+    <!-- Leaflet CSS -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600&display=swap" rel="stylesheet">
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            margin: 0;
+            padding: 0;
+            background: #f4f4f9;
+            color: #333;
+        }
+
+        header {
+            background: #2c3e50;
+            color: white;
+            padding: 1rem 2rem;
+        }
+
+        header h1 {
+            margin: 0;
+            font-size: 1.5rem;
+        }
+
+        .container {
+            display: flex;
+            height: calc(100vh - 60px);
+        }
+
+        .sidebar {
+            width: 350px;
+            padding: 20px;
+            overflow-y: auto;
+            background: white;
+            box-shadow: 2px 0 5px rgba(0, 0, 0, 0.05);
+        }
+
+        .map-container {
+            flex-grow: 1;
+            position: relative;
+        }
+
+        #map {
+            width: 100%;
+            height: 100%;
+        }
+
+        .card {
+            background: white;
+            border-radius: 8px;
+            border: 1px solid #ddd;
+            padding: 15px;
+            margin-bottom: 20px;
+        }
+
+        .card h3 {
+            margin-top: 0;
+            font-size: 1.1rem;
+            color: #34495e;
+        }
+
+        .stat-value {
+            font-size: 1.5rem;
+            font-weight: bold;
+            color: #2980b9;
+        }
+
+        .stat-label {
+            font-size: 0.9rem;
+            color: #7f8c8d;
+        }
+
+        .legend {
+            background: white;
+            padding: 10px;
+            border-radius: 5px;
+            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+            font-size: 0.9rem;
+        }
+
+        .dot {
+            height: 10px;
+            width: 10px;
+            display: inline-block;
+            border-radius: 50%;
+            margin-right: 5px;
+        }
+    </style>
+</head>
+
+<body>
+
+    <header>
+        <h1>Bookmaker Location Analysis for Dublin</h1>
+    </header>
+    <div class="container">
+        <div class="sidebar">
+            <div class="card">
+                <h3>Select Premise Types</h3>
+                <div id="premise-checkboxes">
+                    <div><label><input type="checkbox" value="bookmaker" checked> Bookmaker</label></div>
+                    <div><label><input type="checkbox" value="pub" checked> Pub</label></div>
+                    <div><label><input type="checkbox" value="alcohol" checked> Off-License</label></div>
+                    <div><label><input type="checkbox" value="casino" checked> Casino</label></div>
+                    <div><label><input type="checkbox" value="betting_shop" checked> Betting Shop</label></div>
+                </div>
+                <hr style="margin: 10px 0; border: 0; border-top: 1px solid #eee;">
+                <div><label><input type="checkbox" id="toggle-clusters" checked> Show Clustering (Gi*)</label></div>
+            </div>
+
+            <div class="card">
+                <h3>Research Question</h3>
+                <p>Are <span id="question-type">premises</span> in deprived areas more likely to be on "Main Streets" or
+                    closer to town centers
+                    compared to affluent areas?</p>
+            </div>
+
+            <div class="card">
+                <h3>Statistical Findings</h3>
+                <div id="stats-content">Loading stats...</div>
+            </div>
+
+            <div class="card">
+                <h3>Metrics Explained</h3>
+                <p><strong>Distance to Center:</strong> Meters to nearest OSM 'place' node (Town/Village/Suburb).</p>
+                <p><strong>Main Street:</strong> Based on street name keywords (Main St, High St, The Square, etc).</p>
+            </div>
+        </div>
+        <div class="map-container">
+            <div id="map"></div>
+        </div>
+    </div>
+
+    <!-- Scripts -->
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script>
+        const map = L.map('map').setView([53.3498, -6.2603], 11);
+
+        // Base Layers
+        const light = L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
+            attribution: '&copy; OpenStreetMap contributors &copy; CARTO'
+        }).addTo(map);
+
+        // Color Function for Clusters
+        function getClusterColor(bin) {
+            if (bin.includes('Hot Spot (99%)')) return '#b30000';
+            if (bin.includes('Hot Spot (95%)')) return '#e34a33';
+            if (bin.includes('Hot Spot (90%)')) return '#fc8d59';
+            if (bin.includes('Cold Spot (99%)')) return '#045a8d';
+            if (bin.includes('Cold Spot (95%)')) return '#2b8cbe';
+            if (bin.includes('Cold Spot (90%)')) return '#74a9cf';
+            return '#f0f0f0'; // Not Significant
+        }
+
+        // Style Function
+        function styleClusters(feature) {
+            return {
+                fillColor: getClusterColor(feature.properties.gi_bin),
+                weight: 1,
+                opacity: 1,
+                color: 'white',
+                dashArray: '3',
+            };
+        }
+
+
+        // Helper to get selected types
+        function getSelectedTypes() {
+            const checkboxes = document.querySelectorAll('#premise-checkboxes input:checked');
+            return Array.from(checkboxes).map(search => search.value);
+        }
+
+        function updateDisplay(data) {
+            const selectedTypes = getSelectedTypes();
+            const showClusters = document.getElementById('toggle-clusters').checked;
+
+            try {
+                // 1. Update Map Markers
+                if (window.currentPremiseLayer) {
+                    map.removeLayer(window.currentPremiseLayer);
+                }
+
+                if (data.premises && data.premises.features) {
+                    // Filter features where type is in selectedTypes
+                    const filtered = data.premises.features.filter(f => selectedTypes.includes(f.properties.type));
+
+                    const filteredGeoJSON = { type: 'FeatureCollection', features: filtered };
+
+                    window.currentPremiseLayer = L.geoJSON(filteredGeoJSON, {
+                        pointToLayer: function (feature, latlng) {
+                            const isDeprived = feature.properties.deprivation_class === 'Deprived';
+                            const isAffluent = feature.properties.deprivation_class === 'Affluent';
+
+                            let color = "#7f8c8d"; // Other
+                            if (isDeprived) color = "#e74c3c";
+                            if (isAffluent) color = "#3498db";
+
+                            return L.circleMarker(latlng, {
+                                radius: 6,
+                                fillColor: color,
+                                color: "#fff",
+                                weight: 1,
+                                opacity: 1,
+                                fillOpacity: 1
+                            });
+                        },
+                        onEachFeature: function (feature, layer) {
+                            const p = feature.properties;
+                            layer.bindPopup(`
+                            <strong>${p.name || 'Premise'}</strong><br>
+                            Type: ${p.type}<br>
+                            Class: ${p.deprivation_class}<br>
+                            Distance: ${Math.round(p.dist_to_center_m)}m<br>
+                            Main St: ${p.is_main_street ? 'Yes' : 'No'}
+                        `);
+                        }
+                    }).addTo(map);
+                }
+
+                // 2. Update Clusters Layer
+                if (window.clusterLayer) {
+                    if (showClusters) {
+                        if (!map.hasLayer(window.clusterLayer)) {
+                            map.addLayer(window.clusterLayer);
+                        }
+                    } else {
+                        if (map.hasLayer(window.clusterLayer)) {
+                            map.removeLayer(window.clusterLayer);
+                        }
+                    }
+                }
+
+                // 3. Update Stats (Iterate over selected)
+                const container = document.getElementById('stats-content');
+                const questionType = document.getElementById('question-type');
+
+                if (selectedTypes.length === 0) {
+                    container.innerHTML = "<p>No types selected.</p>";
+                    questionType.innerText = "nothing";
+                    return;
+                }
+
+                questionType.innerText = selectedTypes.join(', ');
+
+                let htmlContent = "";
+
+                selectedTypes.forEach(type => {
+                    htmlContent += `<div style="margin-bottom: 15px; border-bottom: 1px solid #eee; padding-bottom: 10px;">`;
+                    htmlContent += `<strong>${type.charAt(0).toUpperCase() + type.slice(1)}</strong>`;
+
+                    const stats = (data.stats && data.stats[type]) ? data.stats[type] : null;
+
+                    if (!stats) {
+                        htmlContent += "<p class='stat-label'>No data available.</p>";
+                    } else if (stats.error) {
+                        htmlContent += `<p class='stat-label'><em>${stats.error}</em></p>`;
+                    } else if (stats.distance_test) {
+                        const dist = stats.distance_test;
+                        const main = stats.main_street_test;
+
+                        // Safety checks for nulls
+                        const meanDep = dist.mean_deprived != null ? Math.round(dist.mean_deprived) : 'N/A';
+                        const meanNon = dist.mean_non_deprived != null ? Math.round(dist.mean_non_deprived) : 'N/A';
+                        const pValDist = dist.p_value != null ? dist.p_value.toFixed(3) : 'N/A';
+                        const pValMain = main.p_value != null ? main.p_value.toFixed(3) : 'N/A';
+
+                        htmlContent += `
+                        <p class="stat-label">Dist to Center (Mean)</p>
+                        <div style="display: flex; justify-content: space-between;">
+                            <span>Disadvantaged: <strong>${meanDep}m</strong></span>
+                            <span>Affluent: <strong>${meanNon}m</strong></span>
+                        </div>
+                        <p><em>p-value: ${pValDist} (${dist.significant ? 'Significant' : 'Not Sig.'})</em></p>
+                        
+                        <p class="stat-label">On 'Main Street'</p>
+                         <div style="display: flex; justify-content: space-between;">
+                            <span>Disadvantaged: <strong>${main.deprived_main_count}/${main.deprived_total}</strong></span>
+                            <span>Affluent: <strong>${main.non_deprived_main_count}/${main.non_deprived_total}</strong></span>
+                        </div>
+                        <p><em>p-value: ${pValMain}</em></p>
+                        `;
+
+                        if (stats.combined_centrality_test) {
+                            const comb = stats.combined_centrality_test;
+                            const pValComb = comb.p_value != null ? comb.p_value.toFixed(3) : 'N/A';
+                            htmlContent += `
+                            <hr>
+                            <p class="stat-label">Centrality (Dist < 800m OR Main St)</p>
+                            <div style="display: flex; justify-content: space-between;">
+                                <span>Disadvantaged: <strong>${comb.deprived_central_count}/${comb.deprived_total}</strong></span>
+                                <span>Affluent: <strong>${comb.non_deprived_central_count}/${comb.non_deprived_total}</strong></span>
+                            </div>
+                            <p><em>p-value: ${pValComb} (${comb.significant ? 'Significant' : 'Not Sig.'})</em></p>
+                            `;
+                        }
+                    }
+                    htmlContent += `</div>`;
+                });
+
+                container.innerHTML = htmlContent;
+            } catch (error) {
+                console.error("Display Update Error:", error);
+                document.getElementById('stats-content').innerHTML = `<p style="color:red">Error loading findings: ${error.message}</p>`;
+            }
+        }
+
+        // Initial Load
+        fetch('data/data.json')
+            .then(response => response.json())
+            .then(data => {
+                window.dataCache = data; // Store for filtering
+
+                try {
+                    // Add Town Centers (Static)
+                    if (data.centers) {
+                        L.geoJSON(data.centers, {
+                            pointToLayer: (f, ll) => L.circleMarker(ll, { radius: 4, fillColor: "#e67e22", color: "#000", fillOpacity: 0.8 }),
+                            onEachFeature: (f, l) => l.bindPopup(`<strong>Town Center</strong><br>${f.properties.name}`)
+                        }).addTo(map);
+                    }
+
+                    // Add Clusters (Static)
+                    if (data.clusters && data.clusters.features) {
+                        try {
+                            window.clusterLayer = L.geoJSON(data.clusters, {
+                                style: styleClusters,
+                                onEachFeature: (f, l) => l.bindPopup(`<strong>${f.properties.ED_ENGLISH}</strong><br>Status: ${f.properties.gi_bin}`)
+                            });
+                        } catch (e) {
+                            console.error("Failed to load clusters:", e);
+                        }
+                    }
+
+                    // Initial Display
+                    updateDisplay(data);
+
+                    // Listeners
+                    document.querySelectorAll('#premise-checkboxes input').forEach(cb => {
+                        cb.addEventListener('change', () => updateDisplay(window.dataCache));
+                    });
+
+                    document.getElementById('toggle-clusters').addEventListener('change', () => updateDisplay(window.dataCache));
+                } catch (err) {
+                    console.error("Initialization Error:", err);
+                    document.getElementById('stats-content').innerHTML = `<p style="color:red">Init Error: ${err.message}</p>`;
+                }
+            })
+            .catch(err => {
+                console.error("Fetch Error:", err);
+                document.getElementById('stats-content').innerHTML = `<p style="color:red">Data Fetch Error: ${err.message}</p>`;
+            });
+
+        // Add Legend (Updated)
+        var legend = L.control({ position: 'bottomright' });
+        legend.onAdd = function (map) {
+            var div = L.DomUtil.create('div', 'legend');
+            div.innerHTML += '<strong>Premises</strong><br>';
+            div.innerHTML += '<i style="background: #e74c3c" class="dot"></i> Deprived Area<br>';
+            div.innerHTML += '<i style="background: #3498db" class="dot"></i> Non-Deprived<br>';
+            div.innerHTML += '<i style="background: #e67e22" class="dot"></i> Town Center<br>';
+            div.innerHTML += '<hr><strong>Clusters (Gi*)</strong><br>';
+            div.innerHTML += '<i style="background: #b30000" class="dot"></i> Hot Spot (99%)<br>';
+            div.innerHTML += '<i style="background: #fc8d59" class="dot"></i> Hot Spot (90%)<br>';
+            div.innerHTML += '<i style="background: #045a8d" class="dot"></i> Cold Spot (99%)<br>';
+            return div;
+        };
+        legend.addTo(map);
+
+    </script>
+</body>
+
+</html>
